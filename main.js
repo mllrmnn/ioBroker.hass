@@ -273,86 +273,37 @@ function deleteObsoleteObjects(keepObjectIds, cb) {
 }
 
 function cleanupEmptyEntityContainers(cb) {
-    adapter.getForeignObjects(`${adapter.namespace}.entities.*`, (err, objects) => {
-        if (err) {
-            adapter.log.error(err);
-            return cb();
-        }
+    const rootEntitiesId = `${adapter.namespace}.entities`;
 
-        objects = objects || {};
-        const allIds = Object.keys(objects);
-        const rootEntitiesId = `${adapter.namespace}.entities`;
-        const containerIds = allIds
-            .filter(id => objects[id] && objects[id].type !== 'state' && id !== rootEntitiesId)
-            .sort((a, b) => b.length - a.length);
-        const containerSet = new Set(containerIds);
-
-        if (!containerIds.length) {
-            return cb();
-        }
-
-        const directChildCounts = {};
-        const parentContainers = {};
-
-        containerIds.forEach(id => {
-            directChildCounts[id] = 0;
-            parentContainers[id] = null;
-        });
-
-        function findNearestContainer(id, ignoreSelf) {
-            let currentId = id;
-            if (ignoreSelf) {
-                const firstPos = currentId.lastIndexOf('.');
-                currentId = firstPos === -1 ? '' : currentId.substring(0, firstPos);
+    function runPass(pass) {
+        adapter.getForeignObjects(`${adapter.namespace}.entities.*`, (err, objects) => {
+            if (err) {
+                adapter.log.error(err);
+                return cb();
             }
-            while (currentId) {
-                if (containerSet.has(currentId)) {
-                    return currentId;
+
+            objects = objects || {};
+            const allIds = Object.keys(objects);
+
+            const containersToDelete = allIds
+                .filter(id => objects[id] && objects[id].type !== 'state' && id !== rootEntitiesId)
+                .filter(id => !allIds.some(otherId => otherId.startsWith(`${id}.`)));
+
+            if (!containersToDelete.length) {
+                return cb();
+            }
+
+            deleteObjectsById(containersToDelete, false, () => {
+                if (pass >= 50) {
+                    adapter.log.warn('cleanupEmptyEntityContainers reached max passes');
+                    return cb();
                 }
-                const pos = currentId.lastIndexOf('.');
-                if (pos === -1) {
-                    break;
-                }
-                currentId = currentId.substring(0, pos);
-            }
-            return null;
-        }
-
-        containerIds.forEach(id => {
-            parentContainers[id] = findNearestContainer(id, true);
+                setImmediate(runPass, pass + 1);
+            });
         });
+    }
 
-        allIds.forEach(id => {
-            const parentContainer = findNearestContainer(id, true);
-            if (parentContainer) {
-                directChildCounts[parentContainer]++;
-            }
-        });
-
-        const containersToDelete = [];
-        const queue = containerIds.filter(id => directChildCounts[id] === 0);
-        const queued = new Set(queue);
-
-        while (queue.length) {
-            const containerId = queue.pop();
-            containersToDelete.push(containerId);
-
-            const parentId = parentContainers[containerId];
-            if (parentId) {
-                directChildCounts[parentId]--;
-                if (directChildCounts[parentId] === 0 && !queued.has(parentId)) {
-                    queue.push(parentId);
-                    queued.add(parentId);
-                }
-            }
-        }
-
-        if (!containersToDelete.length) {
-            return cb();
-        }
-
-        deleteObjectsById(containersToDelete, false, cb);
-    });
+    runPass(1);
 }
 
 function getAllEntitiesJson(entities) {
