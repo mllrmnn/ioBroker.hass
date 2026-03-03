@@ -249,7 +249,8 @@
     "password": "",
     "secure": false,
     "whitelist": "",
-    "blacklist": ""
+    "blacklist": "",
+    "exposeAllEntitiesJson": false
   },
   "protectedNative": [
     "password"

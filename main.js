@@ -16,6 +16,7 @@ let delayTimeout = null;
 let stopped = false;
 let whitelistRegex = [];
 let blacklistRegex = [];
+let lastAllEntitiesJson = null;
 
 function startAdapter(options) {
     options = options || {};
@@ -252,7 +253,7 @@ function deleteObsoleteObjects(keepObjectIds, cb) {
                 return;
             }
 
-            if (objects[id] && objects[id].type === 'channel') {
+            if (objects[id] && (objects[id].type === 'channel' || objects[id].type === 'folder')) {
                 obsoleteChannelIds.push(id);
             } else {
                 obsoleteObjectIds.push(id);
@@ -268,6 +269,157 @@ function deleteObsoleteObjects(keepObjectIds, cb) {
 
         deleteObjectsById(singleDeleteIds, false, () =>
             deleteObjectsById(obsoleteChannelIds, true, cb));
+    });
+}
+
+function cleanupEmptyEntityContainers(cb) {
+    adapter.getForeignObjects(`${adapter.namespace}.entities.*`, (err, objects) => {
+        if (err) {
+            adapter.log.error(err);
+            return cb();
+        }
+
+        objects = objects || {};
+        const allIds = Object.keys(objects);
+        const containerIds = allIds
+            .filter(id => objects[id] && (objects[id].type === 'channel' || objects[id].type === 'folder'))
+            .sort((a, b) => b.length - a.length);
+        const containerSet = new Set(containerIds);
+
+        if (!containerIds.length) {
+            return cb();
+        }
+
+        const directChildCounts = {};
+        const parentContainers = {};
+
+        containerIds.forEach(id => {
+            directChildCounts[id] = 0;
+            parentContainers[id] = null;
+        });
+
+        function findNearestContainer(id, ignoreSelf) {
+            let currentId = id;
+            if (ignoreSelf) {
+                const firstPos = currentId.lastIndexOf('.');
+                currentId = firstPos === -1 ? '' : currentId.substring(0, firstPos);
+            }
+            while (currentId) {
+                if (containerSet.has(currentId)) {
+                    return currentId;
+                }
+                const pos = currentId.lastIndexOf('.');
+                if (pos === -1) {
+                    break;
+                }
+                currentId = currentId.substring(0, pos);
+            }
+            return null;
+        }
+
+        containerIds.forEach(id => {
+            parentContainers[id] = findNearestContainer(id, true);
+        });
+
+        allIds.forEach(id => {
+            const parentContainer = findNearestContainer(id, true);
+            if (parentContainer) {
+                directChildCounts[parentContainer]++;
+            }
+        });
+
+        const containersToDelete = [];
+        const queue = containerIds.filter(id => directChildCounts[id] === 0);
+        const queued = new Set(queue);
+
+        while (queue.length) {
+            const containerId = queue.pop();
+            containersToDelete.push(containerId);
+
+            const parentId = parentContainers[containerId];
+            if (parentId) {
+                directChildCounts[parentId]--;
+                if (directChildCounts[parentId] === 0 && !queued.has(parentId)) {
+                    queue.push(parentId);
+                    queued.add(parentId);
+                }
+            }
+        }
+
+        if (!containersToDelete.length) {
+            return cb();
+        }
+
+        deleteObjectsById(containersToDelete, false, cb);
+    });
+}
+
+function getAllEntitiesJson(entities) {
+    const entityIds = (entities || [])
+        .filter(entity => entity && typeof entity.entity_id === 'string')
+        .map(entity => entity.entity_id)
+        .sort();
+    return JSON.stringify(entityIds);
+}
+
+function removeAllEntitiesStateIfNeeded(callback) {
+    adapter.delObject('host.all_entities', err => {
+        if (err && !String(err).includes('not found')) {
+            adapter.log.error(`Cannot delete host.all_entities: ${err}`);
+        }
+        adapter.delObject('host', err2 => {
+            if (err2 && !String(err2).includes('not found')) {
+                adapter.log.error(`Cannot delete host channel: ${err2}`);
+            }
+            lastAllEntitiesJson = null;
+            callback && callback();
+        });
+    });
+}
+
+function updateAllEntitiesState(entities, callback) {
+    if (!adapter.config.exposeAllEntitiesJson) {
+        return removeAllEntitiesStateIfNeeded(callback);
+    }
+
+    const json = getAllEntitiesJson(entities);
+    if (json === lastAllEntitiesJson) {
+        callback && callback();
+        return;
+    }
+
+    adapter.setObjectNotExists('host', {
+        type: 'channel',
+        common: {name: 'Host'},
+        native: {}
+    }, err => {
+        if (err) {
+            adapter.log.error(err);
+            callback && callback();
+            return;
+        }
+
+        adapter.setObjectNotExists('host.all_entities', {
+            type: 'state',
+            common: {
+                name: 'All Home Assistant entities as JSON',
+                role: 'json',
+                type: 'string',
+                read: true,
+                write: false
+            },
+            native: {}
+        }, err2 => {
+            if (err2) {
+                adapter.log.error(err2);
+                callback && callback();
+                return;
+            }
+
+            adapter.setState('host.all_entities', json, true);
+            lastAllEntitiesJson = json;
+            callback && callback();
+        });
     });
 }
 
@@ -484,7 +636,8 @@ function parseStates(entities, services, callback) {
 
     syncObjects(objs, () =>
         syncStates(states, () =>
-            deleteObsoleteObjects(keepObjectIds, callback)));
+            deleteObsoleteObjects(keepObjectIds, () =>
+                cleanupEmptyEntityContainers(callback))));
 }
 
 function main() {
@@ -492,6 +645,7 @@ function main() {
     adapter.config.port = parseInt(adapter.config.port, 10) || 8123;
     adapter.config.whitelist = adapter.config.whitelist || '';
     adapter.config.blacklist = adapter.config.blacklist || '';
+    adapter.config.exposeAllEntitiesJson = !!adapter.config.exposeAllEntitiesJson;
 
     updateEntityFilters();
 
@@ -560,6 +714,7 @@ function main() {
                         if (err) {
                             return adapter.log.error(`Cannot read states: ${err}`);
                         }
+                        updateAllEntitiesState(states);
                         //adapter.log.debug(JSON.stringify(states));
                         delayTimeout = setTimeout(() => {
                             delayTimeout = null;
