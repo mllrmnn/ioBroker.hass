@@ -177,25 +177,32 @@ function updateEntityFilters() {
     adapter.log.info(`Entity sync filter active (whitelist=${whitelistRegex.length}, blacklist=${blacklistRegex.length}, labelWhitelist=${labelWhitelistRegex.length}, labelBlacklist=${labelBlacklistRegex.length})`);
 }
 
-function isEntityAllowedByName(entityId) {
-    const allowByWhitelist = whitelistRegex.length === 0 || whitelistRegex.some(regex => regex.test(entityId));
-    if (!allowByWhitelist) {
-        return false;
-    }
-    return !blacklistRegex.some(regex => regex.test(entityId));
+function isEntityWhitelistedByName(entityId) {
+    return whitelistRegex.some(regex => regex.test(entityId));
 }
 
-function isEntityAllowedByLabel(entityId) {
+function isEntityBlacklistedByName(entityId) {
+    return blacklistRegex.some(regex => regex.test(entityId));
+}
+
+function isEntityWhitelistedByLabel(entityId) {
     const labels = entityLabelsById[entityId] || [];
-    const allowByLabelWhitelist = labelWhitelistRegex.length === 0 || labels.some(label => labelWhitelistRegex.some(regex => regex.test(label)));
-    if (!allowByLabelWhitelist) {
-        return false;
-    }
-    return !labels.some(label => labelBlacklistRegex.some(regex => regex.test(label)));
+    return labels.some(label => labelWhitelistRegex.some(regex => regex.test(label)));
+}
+
+function isEntityBlacklistedByLabel(entityId) {
+    const labels = entityLabelsById[entityId] || [];
+    return labels.some(label => labelBlacklistRegex.some(regex => regex.test(label)));
 }
 
 function isEntityAllowed(entityId) {
-    return isEntityAllowedByName(entityId) && isEntityAllowedByLabel(entityId);
+    const hasWhitelist = whitelistRegex.length > 0 || labelWhitelistRegex.length > 0;
+    const allowedByWhitelist = !hasWhitelist || isEntityWhitelistedByName(entityId) || isEntityWhitelistedByLabel(entityId);
+    if (!allowedByWhitelist) {
+        return false;
+    }
+
+    return !isEntityBlacklistedByName(entityId) && !isEntityBlacklistedByLabel(entityId);
 }
 
 function shouldFetchLabelRegistryData() {
