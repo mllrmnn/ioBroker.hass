@@ -18,6 +18,8 @@
             if (!settings) return;
 
             if (settings.password === undefined) settings.password = '';
+            if (settings.whitelist === undefined) settings.whitelist = '';
+            if (settings.blacklist === undefined) settings.blacklist = '';
             settings.passwordRepeat = settings.password;
 
             $('.value').each(function () {
@@ -100,6 +102,19 @@
                 <div class="col s6 m4 input-field">
                     <input id="secure" type="checkbox" class="value" />
                     <span for="secure" class="translate">Secure:</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="row">
+            <div class="col s12 m8 l8">
+                <div class="col s12 input-field">
+                    <textarea class="value materialize-textarea" id="whitelist"></textarea>
+                    <label for="whitelist">Whitelist (regex, optional):</label>
+                </div>
+                <div class="col s12 input-field">
+                    <textarea class="value materialize-textarea" id="blacklist"></textarea>
+                    <label for="blacklist">Blacklist (regex, optional):</label>
                 </div>
             </div>
         </div>

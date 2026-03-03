@@ -14,6 +14,8 @@ let adapter;
 const hassObjects = {};
 let delayTimeout = null;
 let stopped = false;
+let whitelistRegex = [];
+let blacklistRegex = [];
 
 function startAdapter(options) {
     options = options || {};
@@ -136,6 +138,46 @@ function syncStates(states, cb) {
     });
 }
 
+function splitRegexList(value) {
+    if (!value) {
+        return [];
+    }
+    return String(value)
+        .split(/\r?\n|[,;]/)
+        .map(entry => entry.trim())
+        .filter(entry => !!entry);
+}
+
+function compileRegexList(value, configName) {
+    const entries = splitRegexList(value);
+    const regexList = [];
+
+    for (let i = 0; i < entries.length; i++) {
+        try {
+            regexList.push(new RegExp(entries[i]));
+        } catch (err) {
+            adapter.log.warn(`Invalid ${configName} regex "${entries[i]}": ${err.message}`);
+        }
+    }
+
+    return regexList;
+}
+
+function updateEntityFilters() {
+    whitelistRegex = compileRegexList(adapter.config.whitelist, 'whitelist');
+    blacklistRegex = compileRegexList(adapter.config.blacklist, 'blacklist');
+
+    adapter.log.info(`Entity sync filter active (whitelist=${whitelistRegex.length}, blacklist=${blacklistRegex.length})`);
+}
+
+function isEntityAllowed(entityId) {
+    const allowByWhitelist = whitelistRegex.length === 0 || whitelistRegex.some(regex => regex.test(entityId));
+    if (!allowByWhitelist) {
+        return false;
+    }
+    return !blacklistRegex.some(regex => regex.test(entityId));
+}
+
 function syncObjects(objects, cb) {
     if (!objects || !objects.length) {
         return cb();
@@ -168,6 +210,64 @@ function syncObjects(objects, cb) {
                 setImmediate(syncObjects, objects, cb);
             }
         }
+    });
+}
+
+function deleteObjectsById(ids, recursive, cb) {
+    if (!ids || !ids.length) {
+        return cb();
+    }
+
+    const id = ids.shift();
+    const options = recursive ? {recursive: true} : undefined;
+
+    adapter.delForeignObject(id, options, err => {
+        if (err) {
+            adapter.log.error(`Cannot delete object "${id}": ${err}`);
+        } else {
+            adapter.log.debug(`Deleted obsolete object "${id}"`);
+            Object.keys(hassObjects).forEach(objId => {
+                if (objId === id || objId.startsWith(`${id}.`)) {
+                    delete hassObjects[objId];
+                }
+            });
+        }
+        setImmediate(deleteObjectsById, ids, recursive, cb);
+    });
+}
+
+function deleteObsoleteObjects(keepObjectIds, cb) {
+    adapter.getForeignObjects(`${adapter.namespace}.entities.*`, (err, objects) => {
+        if (err) {
+            adapter.log.error(err);
+            return cb();
+        }
+
+        objects = objects || {};
+        const obsoleteChannelIds = [];
+        const obsoleteObjectIds = [];
+
+        Object.keys(objects).forEach(id => {
+            if (keepObjectIds.has(id)) {
+                return;
+            }
+
+            if (objects[id] && objects[id].type === 'channel') {
+                obsoleteChannelIds.push(id);
+            } else {
+                obsoleteObjectIds.push(id);
+            }
+        });
+
+        if (!obsoleteChannelIds.length && !obsoleteObjectIds.length) {
+            return cb();
+        }
+
+        const obsoleteChannelPrefixes = obsoleteChannelIds.map(id => `${id}.`);
+        const singleDeleteIds = obsoleteObjectIds.filter(id => !obsoleteChannelPrefixes.some(prefix => id.startsWith(prefix)));
+
+        deleteObjectsById(singleDeleteIds, false, () =>
+            deleteObjectsById(obsoleteChannelIds, true, cb));
     });
 }
 
@@ -233,6 +333,9 @@ const skipServices = [
 ];
 
 function parseStates(entities, services, callback) {
+    entities = (entities || []).filter(entity => entity && typeof entity.entity_id === 'string' && isEntityAllowed(entity.entity_id));
+    services = services || {};
+
     const objs   = [];
     const states = [];
     let obj;
@@ -377,13 +480,20 @@ function parseStates(entities, services, callback) {
         }
     }
 
+    const keepObjectIds = new Set(objs.map(obj => obj._id));
+
     syncObjects(objs, () =>
-        syncStates(states, callback));
+        syncStates(states, () =>
+            deleteObsoleteObjects(keepObjectIds, callback)));
 }
 
 function main() {
     adapter.config.host = adapter.config.host || '127.0.0.1';
     adapter.config.port = parseInt(adapter.config.port, 10) || 8123;
+    adapter.config.whitelist = adapter.config.whitelist || '';
+    adapter.config.blacklist = adapter.config.blacklist || '';
+
+    updateEntityFilters();
 
     adapter.setState('info.connection', false, true);
 
@@ -395,6 +505,9 @@ function main() {
     hass.on('state_changed', entity => {
         adapter.log.debug(`HASS-Message: State Changed: ${JSON.stringify(entity)}`);
         if (!entity || typeof entity.entity_id !== 'string') {
+            return;
+        }
+        if (!isEntityAllowed(entity.entity_id)) {
             return;
         }
 
