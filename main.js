@@ -281,8 +281,9 @@ function cleanupEmptyEntityContainers(cb) {
 
         objects = objects || {};
         const allIds = Object.keys(objects);
+        const rootEntitiesId = `${adapter.namespace}.entities`;
         const containerIds = allIds
-            .filter(id => objects[id] && (objects[id].type === 'channel' || objects[id].type === 'folder'))
+            .filter(id => objects[id] && objects[id].type !== 'state' && id !== rootEntitiesId)
             .sort((a, b) => b.length - a.length);
         const containerSet = new Set(containerIds);
 
