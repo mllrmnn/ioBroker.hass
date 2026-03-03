@@ -20,6 +20,8 @@
             if (settings.password === undefined) settings.password = '';
             if (settings.whitelist === undefined) settings.whitelist = '';
             if (settings.blacklist === undefined) settings.blacklist = '';
+            if (settings.labelWhitelist === undefined) settings.labelWhitelist = '';
+            if (settings.labelBlacklist === undefined) settings.labelBlacklist = '';
             if (settings.exposeAllEntitiesJson === undefined) settings.exposeAllEntitiesJson = false;
             settings.passwordRepeat = settings.password;
 
@@ -116,6 +118,14 @@
                 <div class="col s12 input-field">
                     <textarea class="value materialize-textarea" id="blacklist"></textarea>
                     <label for="blacklist">Blacklist (regex, optional):</label>
+                </div>
+                <div class="col s12 input-field">
+                    <textarea class="value materialize-textarea" id="labelWhitelist"></textarea>
+                    <label for="labelWhitelist">Label whitelist (regex, optional):</label>
+                </div>
+                <div class="col s12 input-field">
+                    <textarea class="value materialize-textarea" id="labelBlacklist"></textarea>
+                    <label for="labelBlacklist">Label blacklist (regex, optional):</label>
                 </div>
             </div>
         </div>

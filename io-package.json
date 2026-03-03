@@ -250,6 +250,8 @@
     "secure": false,
     "whitelist": "",
     "blacklist": "",
+    "labelWhitelist": "",
+    "labelBlacklist": "",
     "exposeAllEntitiesJson": false
   },
   "protectedNative": [

@@ -16,7 +16,11 @@ let delayTimeout = null;
 let stopped = false;
 let whitelistRegex = [];
 let blacklistRegex = [];
+let labelWhitelistRegex = [];
+let labelBlacklistRegex = [];
 let lastAllEntitiesJson = null;
+let entityLabelsById = {};
+let allowedEntityIds = new Set();
 
 function startAdapter(options) {
     options = options || {};
@@ -167,16 +171,121 @@ function compileRegexList(value, configName) {
 function updateEntityFilters() {
     whitelistRegex = compileRegexList(adapter.config.whitelist, 'whitelist');
     blacklistRegex = compileRegexList(adapter.config.blacklist, 'blacklist');
+    labelWhitelistRegex = compileRegexList(adapter.config.labelWhitelist, 'labelWhitelist');
+    labelBlacklistRegex = compileRegexList(adapter.config.labelBlacklist, 'labelBlacklist');
 
-    adapter.log.info(`Entity sync filter active (whitelist=${whitelistRegex.length}, blacklist=${blacklistRegex.length})`);
+    adapter.log.info(`Entity sync filter active (whitelist=${whitelistRegex.length}, blacklist=${blacklistRegex.length}, labelWhitelist=${labelWhitelistRegex.length}, labelBlacklist=${labelBlacklistRegex.length})`);
 }
 
-function isEntityAllowed(entityId) {
+function isEntityAllowedByName(entityId) {
     const allowByWhitelist = whitelistRegex.length === 0 || whitelistRegex.some(regex => regex.test(entityId));
     if (!allowByWhitelist) {
         return false;
     }
     return !blacklistRegex.some(regex => regex.test(entityId));
+}
+
+function isEntityAllowedByLabel(entityId) {
+    const labels = entityLabelsById[entityId] || [];
+    const allowByLabelWhitelist = labelWhitelistRegex.length === 0 || labels.some(label => labelWhitelistRegex.some(regex => regex.test(label)));
+    if (!allowByLabelWhitelist) {
+        return false;
+    }
+    return !labels.some(label => labelBlacklistRegex.some(regex => regex.test(label)));
+}
+
+function isEntityAllowed(entityId) {
+    return isEntityAllowedByName(entityId) && isEntityAllowedByLabel(entityId);
+}
+
+function shouldFetchLabelRegistryData() {
+    return !!(labelWhitelistRegex.length || labelBlacklistRegex.length);
+}
+
+function getStringArray(values) {
+    if (!values) {
+        return [];
+    }
+    if (Array.isArray(values)) {
+        return values.filter(value => typeof value === 'string' && value);
+    }
+    if (typeof values === 'string' && values) {
+        return [values];
+    }
+    return [];
+}
+
+function normalizeLabelId(label) {
+    if (!label || typeof label !== 'object') {
+        return null;
+    }
+    return label.label_id || label.id || label.labelId || null;
+}
+
+function normalizeLabelName(label) {
+    if (!label || typeof label !== 'object') {
+        return null;
+    }
+    return label.name || label.label || label.title || null;
+}
+
+function buildEntityLabelMapping(entityRegistry, labelRegistry) {
+    const labelNameById = {};
+    const labels = Array.isArray(labelRegistry) ? labelRegistry : [];
+    const entities = Array.isArray(entityRegistry) ? entityRegistry : [];
+
+    labels.forEach(label => {
+        const id = normalizeLabelId(label);
+        const name = normalizeLabelName(label);
+        if (id && name) {
+            labelNameById[id] = name;
+        }
+    });
+
+    const mapping = {};
+    entities.forEach(entity => {
+        if (!entity || typeof entity.entity_id !== 'string') {
+            return;
+        }
+
+        const labelIds = getStringArray(entity.label_ids || entity.labels || entity.labels_ids);
+        const normalizedLabels = [];
+        labelIds.forEach(labelId => {
+            normalizedLabels.push(labelId);
+            if (labelNameById[labelId]) {
+                normalizedLabels.push(labelNameById[labelId]);
+            }
+        });
+        mapping[entity.entity_id] = [...new Set(normalizedLabels)];
+    });
+
+    entityLabelsById = mapping;
+}
+
+function updateEntityLabelMapping(callback) {
+    if (!shouldFetchLabelRegistryData()) {
+        entityLabelsById = {};
+        callback && callback();
+        return;
+    }
+
+    hass.getEntityRegistry((entityErr, entityRegistry) => {
+        if (entityErr) {
+            adapter.log.warn(`Cannot read Home Assistant entity registry for label filtering: ${entityErr}`);
+            entityLabelsById = {};
+            callback && callback();
+            return;
+        }
+
+        hass.getLabelRegistry((labelErr, labelRegistry) => {
+            if (labelErr) {
+                adapter.log.warn(`Cannot read Home Assistant label registry for label filtering: ${labelErr}`);
+            }
+
+            buildEntityLabelMapping(entityRegistry, labelRegistry);
+            callback && callback();
+        });
+    });
 }
 
 function syncObjects(objects, cb) {
@@ -438,6 +547,7 @@ const skipServices = [
 
 function parseStates(entities, services, callback) {
     entities = (entities || []).filter(entity => entity && typeof entity.entity_id === 'string' && isEntityAllowed(entity.entity_id));
+    allowedEntityIds = new Set(entities.map(entity => entity.entity_id));
     services = services || {};
 
     const objs   = [];
@@ -597,6 +707,8 @@ function main() {
     adapter.config.port = parseInt(adapter.config.port, 10) || 8123;
     adapter.config.whitelist = adapter.config.whitelist || '';
     adapter.config.blacklist = adapter.config.blacklist || '';
+    adapter.config.labelWhitelist = adapter.config.labelWhitelist || '';
+    adapter.config.labelBlacklist = adapter.config.labelBlacklist || '';
     adapter.config.exposeAllEntitiesJson = !!adapter.config.exposeAllEntitiesJson;
 
     updateEntityFilters();
@@ -613,7 +725,7 @@ function main() {
         if (!entity || typeof entity.entity_id !== 'string') {
             return;
         }
-        if (!isEntityAllowed(entity.entity_id)) {
+        if (!allowedEntityIds.has(entity.entity_id)) {
             return;
         }
 
@@ -670,19 +782,24 @@ function main() {
                         //adapter.log.debug(JSON.stringify(states));
                         delayTimeout = setTimeout(() => {
                             delayTimeout = null;
-                            !stopped && hass.getServices((err, services) => {
+                            !stopped && updateEntityLabelMapping(() => {
                                 if (stopped) {
                                     return;
                                 }
-                                if (err) {
-                                    adapter.log.error(`Cannot read states: ${err}`);
-                                } else {
-                                    //adapter.log.debug(JSON.stringify(services));
-                                    parseStates(states, services, () => {
-                                        adapter.log.debug('Initial parsing of states done, subscribe to ioBroker states');
-                                        adapter.subscribeStates('*');
-                                    });
-                                }
+                                hass.getServices((err, services) => {
+                                    if (stopped) {
+                                        return;
+                                    }
+                                    if (err) {
+                                        adapter.log.error(`Cannot read states: ${err}`);
+                                    } else {
+                                        //adapter.log.debug(JSON.stringify(services));
+                                        parseStates(states, services, () => {
+                                            adapter.log.debug('Initial parsing of states done, subscribe to ioBroker states');
+                                            adapter.subscribeStates('*');
+                                        });
+                                    }
+                                });
                             })}, 100);
                     })}, 100);
             });
