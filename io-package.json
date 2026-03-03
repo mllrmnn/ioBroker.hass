@@ -252,6 +252,7 @@
     "blacklist": "",
     "labelWhitelist": "",
     "labelBlacklist": "",
+    "labelWhitelistOverridesBlacklist": true,
     "exposeAllEntitiesJson": false
   },
   "protectedNative": [

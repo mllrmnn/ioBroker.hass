@@ -197,9 +197,14 @@ function isEntityBlacklistedByLabel(entityId) {
 
 function isEntityAllowed(entityId) {
     const hasWhitelist = whitelistRegex.length > 0 || labelWhitelistRegex.length > 0;
-    const allowedByWhitelist = !hasWhitelist || isEntityWhitelistedByName(entityId) || isEntityWhitelistedByLabel(entityId);
+    const labelWhitelisted = isEntityWhitelistedByLabel(entityId);
+    const allowedByWhitelist = !hasWhitelist || isEntityWhitelistedByName(entityId) || labelWhitelisted;
     if (!allowedByWhitelist) {
         return false;
+    }
+
+    if (adapter.config.labelWhitelistOverridesBlacklist && labelWhitelisted) {
+        return true;
     }
 
     return !isEntityBlacklistedByName(entityId) && !isEntityBlacklistedByLabel(entityId);
@@ -716,6 +721,10 @@ function main() {
     adapter.config.blacklist = adapter.config.blacklist || '';
     adapter.config.labelWhitelist = adapter.config.labelWhitelist || '';
     adapter.config.labelBlacklist = adapter.config.labelBlacklist || '';
+    if (adapter.config.labelWhitelistOverridesBlacklist === undefined) {
+        adapter.config.labelWhitelistOverridesBlacklist = true;
+    }
+    adapter.config.labelWhitelistOverridesBlacklist = !!adapter.config.labelWhitelistOverridesBlacklist;
     adapter.config.exposeAllEntitiesJson = !!adapter.config.exposeAllEntitiesJson;
 
     updateEntityFilters();
