@@ -21,6 +21,8 @@ let labelBlacklistRegex = [];
 let lastAllEntitiesJson = null;
 let entityLabelsById = {};
 let allowedEntityIds = new Set();
+let hasSuccessfulEntitySnapshot = false;
+let lastSuccessfulEntityCount = 0;
 
 function startAdapter(options) {
     options = options || {};
@@ -557,7 +559,9 @@ const skipServices = [
     'persistent_notification'
 ];
 
-function parseStates(entities, services, callback) {
+function parseStates(entities, services, callback, options) {
+    options = options || {};
+    const allowDeletion = options.allowDeletion !== false;
     entities = (entities || []).filter(entity => entity && typeof entity.entity_id === 'string' && isEntityAllowed(entity.entity_id));
     allowedEntityIds = new Set(entities.map(entity => entity.entity_id));
     services = services || {};
@@ -709,9 +713,26 @@ function parseStates(entities, services, callback) {
     const keepObjectIds = new Set(objs.map(obj => obj._id));
 
     syncObjects(objs, () =>
-        syncStates(states, () =>
+        syncStates(states, () => {
+            if (!allowDeletion) {
+                return callback();
+            }
             deleteObsoleteObjects(keepObjectIds, () =>
-                cleanupEmptyEntityContainers(callback))));
+                cleanupEmptyEntityContainers(callback));
+        }));
+}
+
+function isSnapshotValidForDeletion(states) {
+    if (!Array.isArray(states) || !states.length) {
+        return false;
+    }
+
+    if (!hasSuccessfulEntitySnapshot) {
+        return true;
+    }
+
+    const minExpectedCount = Math.max(10, Math.floor(lastSuccessfulEntityCount * 0.2));
+    return states.length >= minExpectedCount;
 }
 
 function main() {
@@ -809,11 +830,19 @@ function main() {
                                     if (err) {
                                         adapter.log.error(`Cannot read states: ${err}`);
                                     } else {
+                                        const canDelete = connected && isSnapshotValidForDeletion(states);
+                                        if (!canDelete) {
+                                            adapter.log.warn(`Skip delete/cleanup for this sync because snapshot is considered unstable (connected=${connected}, states=${Array.isArray(states) ? states.length : 0}, lastSuccessful=${lastSuccessfulEntityCount})`);
+                                        }
                                         //adapter.log.debug(JSON.stringify(services));
                                         parseStates(states, services, () => {
+                                            if (Array.isArray(states) && states.length) {
+                                                hasSuccessfulEntitySnapshot = true;
+                                                lastSuccessfulEntityCount = states.length;
+                                            }
                                             adapter.log.debug('Initial parsing of states done, subscribe to ioBroker states');
                                             adapter.subscribeStates('*');
-                                        });
+                                        }, {allowDeletion: canDelete});
                                     }
                                 });
                             })}, 100);
