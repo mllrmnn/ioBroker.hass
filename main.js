@@ -23,6 +23,7 @@ let entityLabelsById = {};
 let allowedEntityIds = new Set();
 let hasSuccessfulEntitySnapshot = false;
 let lastSuccessfulEntityCount = 0;
+let retrySyncTimeout = null;
 
 function startAdapter(options) {
     options = options || {};
@@ -111,6 +112,8 @@ function startAdapter(options) {
 function stop(callback) {
     stopped = true;
     delayTimeout && clearTimeout(delayTimeout);
+    retrySyncTimeout && clearTimeout(retrySyncTimeout);
+    retrySyncTimeout = null;
     hass && hass.close();
     callback && callback();
 }
@@ -562,8 +565,11 @@ const skipServices = [
 function parseStates(entities, services, callback, options) {
     options = options || {};
     const allowDeletion = options.allowDeletion !== false;
+    const updateAllowedEntities = options.updateAllowedEntities !== false;
     entities = (entities || []).filter(entity => entity && typeof entity.entity_id === 'string' && isEntityAllowed(entity.entity_id));
-    allowedEntityIds = new Set(entities.map(entity => entity.entity_id));
+    if (updateAllowedEntities) {
+        allowedEntityIds = new Set(entities.map(entity => entity.entity_id));
+    }
     services = services || {};
 
     const objs   = [];
@@ -735,6 +741,74 @@ function isSnapshotValidForDeletion(states) {
     return states.length >= minExpectedCount;
 }
 
+function scheduleSyncRetry() {
+    if (retrySyncTimeout || stopped) {
+        return;
+    }
+    retrySyncTimeout = setTimeout(() => {
+        retrySyncTimeout = null;
+        if (stopped || !connected) {
+            return;
+        }
+        runSyncCycle();
+    }, 15000);
+}
+
+function runSyncCycle() {
+    if (stopped || !connected) {
+        return;
+    }
+
+    hass.getStates((err, states) => {
+        if (stopped) {
+            return;
+        }
+        if (err) {
+            adapter.log.error(`Cannot read states: ${err}`);
+            scheduleSyncRetry();
+            return;
+        }
+
+        updateAllEntitiesState(states);
+
+        updateEntityLabelMapping(() => {
+            if (stopped || !connected) {
+                return;
+            }
+            hass.getServices((err, services) => {
+                if (stopped) {
+                    return;
+                }
+                if (err) {
+                    adapter.log.error(`Cannot read states: ${err}`);
+                    scheduleSyncRetry();
+                    return;
+                }
+
+                const canDelete = connected && isSnapshotValidForDeletion(states);
+                if (!canDelete) {
+                    adapter.log.warn(`Skip delete/cleanup for this sync because snapshot is considered unstable (connected=${connected}, states=${Array.isArray(states) ? states.length : 0}, lastSuccessful=${lastSuccessfulEntityCount})`);
+                }
+
+                parseStates(states, services, () => {
+                    if (Array.isArray(states) && states.length) {
+                        hasSuccessfulEntitySnapshot = true;
+                        lastSuccessfulEntityCount = states.length;
+                    }
+                    if (!canDelete) {
+                        scheduleSyncRetry();
+                    }
+                    adapter.log.debug('Initial parsing of states done, subscribe to ioBroker states');
+                    adapter.subscribeStates('*');
+                }, {
+                    allowDeletion: canDelete,
+                    updateAllowedEntities: canDelete || allowedEntityIds.size === 0
+                });
+            });
+        });
+    });
+}
+
 function main() {
     adapter.config.host = adapter.config.host || '127.0.0.1';
     adapter.config.port = parseInt(adapter.config.port, 10) || 8123;
@@ -762,7 +836,8 @@ function main() {
         if (!entity || typeof entity.entity_id !== 'string') {
             return;
         }
-        if (!allowedEntityIds.has(entity.entity_id)) {
+        const knownStateId = `${adapter.namespace}.entities.${entity.entity_id}.state`;
+        if (allowedEntityIds.size && !allowedEntityIds.has(entity.entity_id) && !hassObjects[knownStateId]) {
             return;
         }
 
@@ -808,45 +883,8 @@ function main() {
                 //adapter.log.debug(JSON.stringify(config));
                 delayTimeout = setTimeout(() => {
                     delayTimeout = null;
-                    !stopped && hass.getStates((err, states) => {
-                        if (stopped) {
-                            return;
-                        }
-                        if (err) {
-                            return adapter.log.error(`Cannot read states: ${err}`);
-                        }
-                        updateAllEntitiesState(states);
-                        //adapter.log.debug(JSON.stringify(states));
-                        delayTimeout = setTimeout(() => {
-                            delayTimeout = null;
-                            !stopped && updateEntityLabelMapping(() => {
-                                if (stopped) {
-                                    return;
-                                }
-                                hass.getServices((err, services) => {
-                                    if (stopped) {
-                                        return;
-                                    }
-                                    if (err) {
-                                        adapter.log.error(`Cannot read states: ${err}`);
-                                    } else {
-                                        const canDelete = connected && isSnapshotValidForDeletion(states);
-                                        if (!canDelete) {
-                                            adapter.log.warn(`Skip delete/cleanup for this sync because snapshot is considered unstable (connected=${connected}, states=${Array.isArray(states) ? states.length : 0}, lastSuccessful=${lastSuccessfulEntityCount})`);
-                                        }
-                                        //adapter.log.debug(JSON.stringify(services));
-                                        parseStates(states, services, () => {
-                                            if (Array.isArray(states) && states.length) {
-                                                hasSuccessfulEntitySnapshot = true;
-                                                lastSuccessfulEntityCount = states.length;
-                                            }
-                                            adapter.log.debug('Initial parsing of states done, subscribe to ioBroker states');
-                                            adapter.subscribeStates('*');
-                                        }, {allowDeletion: canDelete});
-                                    }
-                                });
-                            })}, 100);
-                    })}, 100);
+                    !stopped && runSyncCycle();
+                }, 100);
             });
         }
     });
