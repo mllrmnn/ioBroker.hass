@@ -836,6 +836,14 @@ function main() {
         if (!entity || typeof entity.entity_id !== 'string') {
             return;
         }
+        // During reconnect/rebuild we can receive events before objects/allow-list are ready.
+        if (!allowedEntityIds.size) {
+            return;
+        }
+        // Fast-path: entities blacklisted by name should never produce unknown-object noise.
+        if (isEntityBlacklistedByName(entity.entity_id)) {
+            return;
+        }
         const knownStateId = `${adapter.namespace}.entities.${entity.entity_id}.state`;
         if (allowedEntityIds.size && !allowedEntityIds.has(entity.entity_id) && !hassObjects[knownStateId]) {
             return;
