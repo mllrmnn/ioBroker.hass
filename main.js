@@ -7,6 +7,8 @@
 const utils       = require('@iobroker/adapter-core');
 const HASS        = require('./lib/hass');
 const adapterName = require('./package.json').name.split('.').pop();
+const DELETE_WARMUP_MS = 2 * 60 * 1000;
+const MIN_STABLE_SNAPSHOTS_FOR_DELETE = 3;
 
 let connected = false;
 let hass;
@@ -24,6 +26,8 @@ let allowedEntityIds = new Set();
 let hasSuccessfulEntitySnapshot = false;
 let lastSuccessfulEntityCount = 0;
 let retrySyncTimeout = null;
+let connectedSince = 0;
+let stableSnapshotStreak = 0;
 
 function startAdapter(options) {
     options = options || {};
@@ -282,7 +286,7 @@ function buildEntityLabelMapping(entityRegistry, labelRegistry) {
 function updateEntityLabelMapping(callback) {
     if (!shouldFetchLabelRegistryData()) {
         entityLabelsById = {};
-        callback && callback();
+        callback && callback(true);
         return;
     }
 
@@ -290,17 +294,19 @@ function updateEntityLabelMapping(callback) {
         if (entityErr) {
             adapter.log.warn(`Cannot read Home Assistant entity registry for label filtering: ${entityErr}`);
             entityLabelsById = {};
-            callback && callback();
+            callback && callback(false);
             return;
         }
 
         hass.getLabelRegistry((labelErr, labelRegistry) => {
             if (labelErr) {
                 adapter.log.warn(`Cannot read Home Assistant label registry for label filtering: ${labelErr}`);
+                callback && callback(false);
+                return;
             }
 
             buildEntityLabelMapping(entityRegistry, labelRegistry);
-            callback && callback();
+            callback && callback(true);
         });
     });
 }
@@ -737,8 +743,15 @@ function isSnapshotValidForDeletion(states) {
         return true;
     }
 
-    const minExpectedCount = Math.max(10, Math.floor(lastSuccessfulEntityCount * 0.2));
+    const minExpectedCount = Math.max(50, Math.floor(lastSuccessfulEntityCount * 0.7));
     return states.length >= minExpectedCount;
+}
+
+function isDeleteWarmupElapsed() {
+    if (!connectedSince) {
+        return false;
+    }
+    return (Date.now() - connectedSince) >= DELETE_WARMUP_MS;
 }
 
 function scheduleSyncRetry() {
@@ -771,7 +784,7 @@ function runSyncCycle() {
 
         updateAllEntitiesState(states);
 
-        updateEntityLabelMapping(() => {
+        updateEntityLabelMapping(labelDataReady => {
             if (stopped || !connected) {
                 return;
             }
@@ -785,13 +798,17 @@ function runSyncCycle() {
                     return;
                 }
 
-                const canDelete = connected && isSnapshotValidForDeletion(states);
+                const snapshotLooksStable = isSnapshotValidForDeletion(states);
+                stableSnapshotStreak = snapshotLooksStable ? (stableSnapshotStreak + 1) : 0;
+                const deleteWarmupElapsed = isDeleteWarmupElapsed();
+                const hasEnoughStableSnapshots = stableSnapshotStreak >= MIN_STABLE_SNAPSHOTS_FOR_DELETE;
+                const canDelete = connected && snapshotLooksStable && deleteWarmupElapsed && hasEnoughStableSnapshots && labelDataReady;
                 if (!canDelete) {
-                    adapter.log.warn(`Skip delete/cleanup for this sync because snapshot is considered unstable (connected=${connected}, states=${Array.isArray(states) ? states.length : 0}, lastSuccessful=${lastSuccessfulEntityCount})`);
+                    adapter.log.warn(`Skip delete/cleanup for this sync (connected=${connected}, states=${Array.isArray(states) ? states.length : 0}, lastSuccessful=${lastSuccessfulEntityCount}, stableStreak=${stableSnapshotStreak}/${MIN_STABLE_SNAPSHOTS_FOR_DELETE}, warmupElapsed=${deleteWarmupElapsed}, labelDataReady=${labelDataReady})`);
                 }
 
                 parseStates(states, services, () => {
-                    if (Array.isArray(states) && states.length) {
+                    if (Array.isArray(states) && states.length && (canDelete || !hasSuccessfulEntitySnapshot)) {
                         hasSuccessfulEntitySnapshot = true;
                         lastSuccessfulEntityCount = states.length;
                     }
@@ -882,6 +899,8 @@ function main() {
         if (!connected) {
             adapter.log.debug('Connected');
             connected = true;
+            connectedSince = Date.now();
+            stableSnapshotStreak = 0;
             adapter.setState('info.connection', true, true);
             hass.getConfig((err, config) => {
                 if (err) {
@@ -901,6 +920,8 @@ function main() {
         if (connected) {
             adapter.log.debug('Disconnected');
             connected = false;
+            connectedSince = 0;
+            stableSnapshotStreak = 0;
             adapter.setState('info.connection', false, true);
         }
     });
