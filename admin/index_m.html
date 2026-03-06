@@ -24,6 +24,7 @@
             if (settings.labelBlacklist === undefined) settings.labelBlacklist = '';
             if (settings.labelWhitelistOverridesBlacklist === undefined) settings.labelWhitelistOverridesBlacklist = true;
             if (settings.exposeAllEntitiesJson === undefined) settings.exposeAllEntitiesJson = false;
+            if (settings.exposeSyncedEntitiesJson === undefined) settings.exposeSyncedEntitiesJson = true;
             settings.passwordRepeat = settings.password;
 
             $('.value').each(function () {
@@ -140,6 +141,10 @@
                 <div class="col s12 input-field">
                     <input id="exposeAllEntitiesJson" type="checkbox" class="value" />
                     <span for="exposeAllEntitiesJson">Create state host.all_entities (JSON list of all HA entities)</span>
+                </div>
+                <div class="col s12 input-field">
+                    <input id="exposeSyncedEntitiesJson" type="checkbox" class="value" />
+                    <span for="exposeSyncedEntitiesJson">Create state host.synced_entities (JSON list of synced HA entities)</span>
                 </div>
             </div>
         </div>

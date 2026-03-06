@@ -253,7 +253,8 @@
     "labelWhitelist": "",
     "labelBlacklist": "",
     "labelWhitelistOverridesBlacklist": true,
-    "exposeAllEntitiesJson": false
+    "exposeAllEntitiesJson": false,
+    "exposeSyncedEntitiesJson": true
   },
   "protectedNative": [
     "password"

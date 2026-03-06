@@ -21,6 +21,7 @@ let blacklistRegex = [];
 let labelWhitelistRegex = [];
 let labelBlacklistRegex = [];
 let lastAllEntitiesJson = null;
+let lastSyncedEntitiesJson = null;
 let entityLabelsById = {};
 let allowedEntityIds = new Set();
 let hasSuccessfulEntitySnapshot = false;
@@ -446,28 +447,34 @@ function getAllEntitiesJson(entities) {
     return JSON.stringify(entityIds);
 }
 
-function removeAllEntitiesStateIfNeeded(callback) {
-    adapter.delObject('host.all_entities', err => {
+function getSyncedEntitiesJson() {
+    return JSON.stringify(Array.from(allowedEntityIds).sort());
+}
+
+function cleanupHostChannelIfUnused(callback) {
+    if (adapter.config.exposeAllEntitiesJson || adapter.config.exposeSyncedEntitiesJson) {
+        callback && callback();
+        return;
+    }
+    adapter.delObject('host', err => {
         if (err && !String(err).includes('not found')) {
-            adapter.log.error(`Cannot delete host.all_entities: ${err}`);
+            adapter.log.error(`Cannot delete host channel: ${err}`);
         }
-        adapter.delObject('host', err2 => {
-            if (err2 && !String(err2).includes('not found')) {
-                adapter.log.error(`Cannot delete host channel: ${err2}`);
-            }
-            lastAllEntitiesJson = null;
-            callback && callback();
-        });
+        callback && callback();
     });
 }
 
-function updateAllEntitiesState(entities, callback) {
-    if (!adapter.config.exposeAllEntitiesJson) {
-        return removeAllEntitiesStateIfNeeded(callback);
-    }
+function removeHostStateIfNeeded(stateId, callback) {
+    adapter.delObject(stateId, err => {
+        if (err && !String(err).includes('not found')) {
+            adapter.log.error(`Cannot delete ${stateId}: ${err}`);
+        }
+        cleanupHostChannelIfUnused(callback);
+    });
+}
 
-    const json = getAllEntitiesJson(entities);
-    if (json === lastAllEntitiesJson) {
+function ensureHostState(stateId, stateName, json, cacheKey, callback) {
+    if (cacheKey.value === json) {
         callback && callback();
         return;
     }
@@ -483,10 +490,10 @@ function updateAllEntitiesState(entities, callback) {
             return;
         }
 
-        adapter.setObjectNotExists('host.all_entities', {
+        adapter.setObjectNotExists(stateId, {
             type: 'state',
             common: {
-                name: 'All Home Assistant entities as JSON',
+                name: stateName,
                 role: 'json',
                 type: 'string',
                 read: true,
@@ -500,11 +507,37 @@ function updateAllEntitiesState(entities, callback) {
                 return;
             }
 
-            adapter.setState('host.all_entities', json, true);
-            lastAllEntitiesJson = json;
+            adapter.setState(stateId, json, true);
+            cacheKey.value = json;
             callback && callback();
         });
     });
+}
+
+function updateAllEntitiesState(entities, callback) {
+    if (!adapter.config.exposeAllEntitiesJson) {
+        lastAllEntitiesJson = null;
+        return removeHostStateIfNeeded('host.all_entities', callback);
+    }
+
+    const json = getAllEntitiesJson(entities);
+    ensureHostState('host.all_entities', 'All Home Assistant entities as JSON', json, {
+        get value() { return lastAllEntitiesJson; },
+        set value(v) { lastAllEntitiesJson = v; }
+    }, callback);
+}
+
+function updateSyncedEntitiesState(callback) {
+    if (!adapter.config.exposeSyncedEntitiesJson) {
+        lastSyncedEntitiesJson = null;
+        return removeHostStateIfNeeded('host.synced_entities', callback);
+    }
+
+    const json = getSyncedEntitiesJson();
+    ensureHostState('host.synced_entities', 'Synced Home Assistant entities as JSON', json, {
+        get value() { return lastSyncedEntitiesJson; },
+        set value(v) { lastSyncedEntitiesJson = v; }
+    }, callback);
 }
 
 function syncRoom(room, members, cb) {
@@ -576,6 +609,7 @@ function parseStates(entities, services, callback, options) {
     if (updateAllowedEntities) {
         allowedEntityIds = new Set(entities.map(entity => entity.entity_id));
     }
+    updateSyncedEntitiesState();
     services = services || {};
 
     const objs   = [];
@@ -838,6 +872,10 @@ function main() {
     }
     adapter.config.labelWhitelistOverridesBlacklist = !!adapter.config.labelWhitelistOverridesBlacklist;
     adapter.config.exposeAllEntitiesJson = !!adapter.config.exposeAllEntitiesJson;
+    if (adapter.config.exposeSyncedEntitiesJson === undefined) {
+        adapter.config.exposeSyncedEntitiesJson = true;
+    }
+    adapter.config.exposeSyncedEntitiesJson = !!adapter.config.exposeSyncedEntitiesJson;
 
     updateEntityFilters();
 
